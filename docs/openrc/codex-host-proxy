@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+
+description="OpenAI-compatible proxy for Codex App Server"
+command="/usr/local/bin/codex-host-proxy"
+command_user="alice"
+supervisor="supervise-daemon"
+respawn_delay=3
+respawn_max=5
+respawn_period=60
+umask=0077
+
+depend() {
+    need codex-app-server
+}
+
+start_pre() {
+    set -a
+    . /etc/codex-host-proxy.env || return 1
+    set +a
+}

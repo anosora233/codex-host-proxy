@@ -1,0 +1,13 @@
+[Unit]
+Description=Codex App Server
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=alice
+Environment=HOME=/home/alice
+ExecStart=/usr/local/bin/codex app-server --listen ws://127.0.0.1:4500 --ws-auth capability-token --ws-token-sha256 REPLACE_WITH_WS_TOKEN_SHA256
+Restart=on-failure
+RestartSec=3s

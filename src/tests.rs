@@ -731,12 +731,8 @@ async fn mock(listener: TcpListener, image_root: PathBuf, resume: oneshot::Recei
     assert_eq!(turn["method"], "turn/start");
     let image = &turn["params"]["input"][2];
     assert_eq!(image["type"], "localImage");
-    let relative = image["path"]
-        .as_str()
-        .unwrap()
-        .strip_prefix(r"C:\shared\")
-        .unwrap();
-    let file = image_root.join(relative.replace('\\', "/"));
+    let file = std::path::Path::new(image["path"].as_str().unwrap());
+    assert!(file.is_absolute() && file.starts_with(image_root));
     assert_eq!(tokio::fs::read(file).await.unwrap(), b"\x89PNG\r\n\x1a\n");
     // Send the first delta before the turn/start response to exercise notification ordering.
     send(
@@ -790,7 +786,7 @@ async fn exercise(cancel: bool) {
         ws_token: "host-token".into(),
         api_key: "client-key".into(),
         cwd: r"C:\repo".into(),
-        images: Some((dir.path().to_owned(), r"C:\shared".into())),
+        images: Some(dir.path().to_owned()),
         timeout: Duration::from_secs(5),
     });
     let body = json!({ "stream": true, "model": "vision-model", "messages": [{

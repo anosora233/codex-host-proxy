@@ -119,10 +119,8 @@ pub async fn prepare(
                                     "Only user messages can include images",
                                 ));
                             }
-                            let (container, host) = config.images.as_ref().ok_or_else(|| {
-                                ApiError::bad_request(
-                                    "Image input requires a configured shared directory",
-                                )
+                            let image_dir = config.images.as_ref().ok_or_else(|| {
+                                ApiError::bad_request("Image input requires CODEX_HOST_IMAGE_DIR")
                             })?;
                             if model["inputModalities"]
                                 .as_array()
@@ -144,20 +142,21 @@ pub async fn prepare(
                                 directory = Some(
                                     tempfile::Builder::new()
                                         .prefix("codex-")
-                                        .tempdir_in(container)
+                                        .tempdir_in(image_dir)
                                         .map_err(ApiError::internal)?,
                                 );
                             }
-                            let dir = directory.as_ref().unwrap().path();
-                            let filename = format!("{}.{extension}", Uuid::new_v4());
-                            tokio::fs::write(dir.join(&filename), bytes)
+                            let file = directory
+                                .as_ref()
+                                .unwrap()
+                                .path()
+                                .join(format!("{}.{extension}", Uuid::new_v4()));
+                            let path = file.to_str().ok_or_else(|| {
+                                ApiError::internal("Image path must be valid UTF-8")
+                            })?;
+                            tokio::fs::write(&file, bytes)
                                 .await
                                 .map_err(ApiError::internal)?;
-                            let subdir = dir.file_name().unwrap().to_string_lossy();
-                            let path = format!(
-                                "{}\\{subdir}\\{filename}",
-                                host.trim_end_matches(['\\', '/'])
-                            );
                             inputs.push(json!({ "type": "localImage", "path": path }));
                         }
                     }

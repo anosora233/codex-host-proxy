@@ -1,6 +1,0 @@
-.git
-.cargo-cache
-target
-.env
-images
-.codex-ws-token

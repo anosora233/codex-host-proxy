@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+
+description="Codex App Server"
+command="/usr/local/bin/codex"
+command_args="app-server --listen ws://127.0.0.1:4500 --ws-auth capability-token --ws-token-sha256 REPLACE_WITH_WS_TOKEN_SHA256"
+command_user="alice"
+supervisor="supervise-daemon"
+respawn_delay=3
+respawn_max=5
+respawn_period=60
+
+depend() {
+    need net
+}
+
+start_pre() {
+    export HOME=/home/alice
+}

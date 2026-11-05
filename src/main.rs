@@ -21,7 +21,12 @@ use axum::{
 use codex::Codex;
 use input::Chat;
 use serde_json::{Value, json};
-use std::{env, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{
     net::TcpListener,
     sync::{Semaphore, mpsc},
@@ -34,7 +39,7 @@ struct Config {
     ws_token: String,
     api_key: String,
     cwd: String,
-    images: Option<(PathBuf, String)>,
+    images: Option<PathBuf>,
     timeout: Duration,
 }
 
@@ -47,21 +52,13 @@ impl Config {
                 .with_context(|| format!("Set {name}"))
         };
         let cwd = required("CODEX_HOST_CWD")?;
-        if !windows_absolute(&cwd) {
-            bail!("CODEX_HOST_CWD must be an absolute Windows path");
+        if !Path::new(&cwd).is_absolute() {
+            bail!("CODEX_HOST_CWD must be an absolute path");
         }
-        let images = match (
-            env::var_os("PROXY_IMAGE_DIR"),
-            env::var("CODEX_HOST_IMAGE_DIR").ok(),
-        ) {
-            (None, None) => None,
-            (Some(local), Some(host))
-                if PathBuf::from(&local).is_absolute() && windows_absolute(&host) =>
-            {
-                Some((local.into(), host))
-            }
-            _ => bail!("Set both image directories to absolute paths or leave both unset"),
-        };
+        let images = env::var_os("CODEX_HOST_IMAGE_DIR").map(PathBuf::from);
+        if images.as_ref().is_some_and(|path| !path.is_absolute()) {
+            bail!("CODEX_HOST_IMAGE_DIR must be an absolute path");
+        }
         let seconds = env::var("REQUEST_TIMEOUT_SECONDS")
             .unwrap_or_else(|_| "300".into())
             .parse::<u64>()?;
@@ -69,8 +66,7 @@ impl Config {
             bail!("REQUEST_TIMEOUT_SECONDS must be between 1 and 3600");
         }
         Ok(Self {
-            ws_url: env::var("CODEX_WS_URL")
-                .unwrap_or_else(|_| "ws://host.docker.internal:4500".into()),
+            ws_url: env::var("CODEX_WS_URL").unwrap_or_else(|_| "ws://127.0.0.1:4500".into()),
             ws_token: required("CODEX_WS_TOKEN")?,
             api_key: required("PROXY_API_KEY")?,
             cwd,
@@ -78,14 +74,6 @@ impl Config {
             timeout: Duration::from_secs(seconds),
         })
     }
-}
-
-fn windows_absolute(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    matches!(bytes, [letter, b':', b'\\' | b'/', ..] if letter.is_ascii_alphabetic())
-        || path
-            .strip_prefix(r"\\")
-            .is_some_and(|tail| tail.split('\\').filter(|part| !part.is_empty()).count() >= 2)
 }
 
 struct App {
@@ -318,7 +306,7 @@ async fn main() -> Result<()> {
     let state =
         response_state::State::open(env::var_os("RESPONSES_STATE_FILE").map(PathBuf::from))?;
     let app = router_with_state(Config::from_env()?, state);
-    let address = env::var("PROXY_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8787".into());
+    let address = env::var("PROXY_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8787".into());
     let listener = TcpListener::bind(&address).await?;
     eprintln!("Proxy listening on {}", listener.local_addr()?);
     axum::serve(listener, app).await?;

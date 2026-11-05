@@ -1,0 +1,19 @@
+[Unit]
+Description=OpenAI-compatible proxy for Codex App Server
+Requires=codex-app-server.service
+After=codex-app-server.service
+PartOf=codex-app-server.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=alice
+EnvironmentFile=/etc/codex-host-proxy.env
+ExecStart=/usr/local/bin/codex-host-proxy
+Restart=on-failure
+RestartSec=3s
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

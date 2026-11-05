@@ -1,0 +1,100 @@
+name: Build and release
+
+on:
+  pull_request:
+  push:
+    branches: ['**']
+    tags: ['v[0-9]*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --target "${{ matrix.target }}"
+
+      - name: Install musl linker
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          linker_var="CARGO_TARGET_${TARGET^^}_LINKER"
+          echo "${linker_var//-/_}=musl-gcc" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Test
+        run: cargo +stable test --locked --target "${{ matrix.target }}"
+
+      - name: Build release binary
+        run: cargo +stable build --locked --release --target "${{ matrix.target }}"
+
+      - name: Package Linux binary
+        if: github.ref_type == 'tag' && runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p dist
+          tar -czf "dist/codex-host-proxy-$TARGET.tar.gz" \
+            -C "target/$TARGET/release" codex-host-proxy
+
+      - name: Package Windows binary
+        if: github.ref_type == 'tag' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Compress-Archive -LiteralPath "target/$env:TARGET/release/codex-host-proxy.exe" `
+            -DestinationPath "dist/codex-host-proxy-$env:TARGET.zip"
+
+      - uses: actions/upload-artifact@v4
+        if: github.ref_type == 'tag'
+        with:
+          name: codex-host-proxy-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: codex-host-proxy-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cd dist
+          sha256sum -- *.tar.gz *.zip > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes \
+            -- *.tar.gz *.zip SHA256SUMS
