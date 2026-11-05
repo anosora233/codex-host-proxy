@@ -56,8 +56,18 @@ pub async fn create(
     }
     let completion = Completion::new("resp_", request.model.clone());
     let mut tools = BTreeMap::new();
+    let mut image_generation = false;
     for tool in request.tools.into_iter().flatten() {
-        add_function(&mut tools, tool)?;
+        if tool["type"] == "image_generation" {
+            if image_generation || tool != json!({"type": "image_generation"}) {
+                return Err(ApiError::bad_request(
+                    "Only one image_generation tool without options is supported",
+                ));
+            }
+            image_generation = true;
+        } else {
+            add_function(&mut tools, tool)?;
+        }
     }
     let mut messages = Vec::new();
     match request.input {
@@ -156,6 +166,10 @@ pub async fn create(
         messages: serde_json::from_value(Value::Array(messages))
             .map_err(|_| ApiError::bad_request("Invalid Responses input"))?,
         tools: Tools::Responses(tools),
+        image_generation: match request.tool_choice.as_ref().and_then(Value::as_str) {
+            Some("none") => Some(false),
+            _ => image_generation.then_some(true),
+        },
         tool_choice: request.tool_choice,
     };
     let receiver = start_chat(
@@ -172,13 +186,18 @@ pub async fn create(
     if request.stream {
         return Ok(stream_response(encoder, receiver, app, history));
     }
-    let reply::Collected { text, usage, tool } =
-        reply::collect(receiver).await.map_err(turn_error)?;
+    let reply::Collected {
+        text,
+        usage,
+        tool,
+        image,
+    } = reply::collect(receiver).await.map_err(turn_error)?;
     if !text.is_empty() {
         encoder.message_id = Some(message_id());
         encoder.text = text;
     }
     encoder.usage = usage;
+    encoder.image = image;
     encoder.finish(tool);
     encoder
         .remember(&app, history)
@@ -232,6 +251,7 @@ struct Encoder {
     sequence: u64,
     events: VecDeque<Event>,
     output: Vec<Value>,
+    image: Option<Value>,
     message_id: Option<String>,
     text: String,
     finished: bool,
@@ -241,7 +261,13 @@ struct Encoder {
 
 impl Encoder {
     async fn remember(&self, app: &Arc<App>, history: Option<Vec<Value>>) -> Result<()> {
-        let record = Record::new(self.completion.id.clone(), history, self.output.clone());
+        let output = self
+            .output
+            .iter()
+            .filter(|item| item["type"] != "image_generation_call")
+            .cloned()
+            .collect();
+        let record = Record::new(self.completion.id.clone(), history, output);
         let app = app.clone();
         tokio::task::spawn_blocking(move || app.response_items.remember(record)).await?
     }
@@ -254,6 +280,7 @@ impl Encoder {
             sequence: 0,
             events: VecDeque::new(),
             output: Vec::new(),
+            image: None,
             message_id: None,
             text: String::new(),
             finished: false,
@@ -378,6 +405,10 @@ impl Encoder {
                 self.usage = Some(usage);
                 return Ok(());
             }
+            Some(Output::Image(image)) => {
+                self.image = Some(image);
+                return Ok(());
+            }
             Some(Output::Tool(call, delivered)) => self.finish(Some((call, delivered))),
             None => self.finish(None),
         }
@@ -386,6 +417,22 @@ impl Encoder {
 
     fn finish(&mut self, tool: Option<(Value, oneshot::Sender<()>)>) {
         self.finish_message();
+        if let Some(image) = self.image.take() {
+            let index = self.output.len();
+            self.emit("response.output_item.added", |_| json!({
+                "output_index": index,
+                "item": {"id": image["id"], "type": "image_generation_call", "status": "in_progress"}
+            }));
+            self.emit(
+                "response.image_generation_call.completed",
+                |_| json!({"output_index": index, "item_id": image["id"]}),
+            );
+            self.emit(
+                "response.output_item.done",
+                |_| json!({"output_index": index, "item": image}),
+            );
+            self.output.push(image);
+        }
         if let Some((call, delivered)) = tool {
             self.finish_tool(call);
             self.handoff = Some(delivered);

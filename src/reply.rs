@@ -39,6 +39,7 @@ impl Completion {
 
 pub struct Collected {
     pub text: String,
+    pub image: Option<Value>,
     pub usage: Option<Usage>,
     pub tool: Option<(Value, oneshot::Sender<()>)>,
 }
@@ -46,12 +47,14 @@ pub struct Collected {
 pub async fn collect(mut receiver: mpsc::Receiver<Result<Output>>) -> Result<Collected> {
     let mut reply = Collected {
         text: String::new(),
+        image: None,
         usage: None,
         tool: None,
     };
     while let Some(next) = receiver.recv().await {
         match next? {
             Output::Text(text) => append(&mut reply.text, &text)?,
+            Output::Image(image) => reply.image = Some(image),
             Output::Usage(usage) => reply.usage = Some(usage),
             Output::Tool(call, delivered) => {
                 reply.tool = Some((call, delivered));

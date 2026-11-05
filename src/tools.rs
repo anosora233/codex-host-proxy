@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 pub enum Output {
     Text(String),
+    Image(Value),
     Tool(Value, oneshot::Sender<()>),
     Usage(crate::usage::Usage),
 }
@@ -72,6 +73,7 @@ struct Pending {
     id: String,
     model: String,
     response_id: Option<String>,
+    image_generation: bool,
     result: oneshot::Sender<Continuation>,
 }
 
@@ -81,6 +83,7 @@ impl PendingTool {
         model: &str,
         params: &Value,
         response_id: Option<&str>,
+        image_generation: bool,
     ) -> Result<(Value, oneshot::Receiver<Continuation>)> {
         let name = params["tool"]
             .as_str()
@@ -98,6 +101,7 @@ impl PendingTool {
             id,
             model: model.to_owned(),
             response_id: response_id.map(str::to_owned),
+            image_generation,
             result,
         });
         Ok((call, receiver))
@@ -108,6 +112,7 @@ impl PendingTool {
         id: &str,
         model: &str,
         previous_id: Option<&str>,
+        image_generation: Option<bool>,
         continuation: Continuation,
     ) -> Result<(), ApiError> {
         let conflict = || {
@@ -118,12 +123,18 @@ impl PendingTool {
             )
         };
         let mut slot = self.0.lock().unwrap();
-        if !slot.as_ref().is_some_and(|pending| {
-            pending.id == id
-                && pending.model == model
-                && previous_id.is_none_or(|id| pending.response_id.as_deref() == Some(id))
-        }) {
-            return Err(conflict());
+        let pending = slot
+            .as_ref()
+            .filter(|pending| {
+                pending.id == id
+                    && pending.model == model
+                    && previous_id.is_none_or(|id| pending.response_id.as_deref() == Some(id))
+            })
+            .ok_or_else(conflict)?;
+        if image_generation.is_some_and(|enabled| enabled != pending.image_generation) {
+            return Err(ApiError::bad_request(
+                "Image generation cannot be changed while resuming a pending tool call",
+            ));
         }
         slot.take()
             .unwrap()

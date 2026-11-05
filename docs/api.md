@@ -21,6 +21,14 @@ DSH 自定义模型 API 可以选择 **OpenAI Responses**（`openai-responses`�
 
 Responses 的 `additional_tools` 可声明函数工具。代理把这些定义与顶层 `tools` 合并，在新 Codex thread 启动时一起注册。同名工具使用最后一份定义。工具的逐项加载时机以及在挂起的 turn 中新增工具超出当前实现范围。
 
+### 图片生成
+
+在 `/v1/responses` 的顶层 `tools` 添加 `{"type":"image_generation"}`，并在 `input` 中描述要生成的图片。需要本机 Codex App Server 和登录账号支持内置图片生成。代理每个 turn 最多返回一张图片，原始图片上限为 5 MiB。JSON 的 `output` 和 SSE 的 `response.completed` 都通过 `image_generation_call.result` 返回完整图片的 base64。图片输出项不会写入会话缓存。
+
+当前支持无额外选项的生成请求。图片编辑、逐帧预览、单独的 Images API 路由及通过 `fileId` 取图暂未实现。若 App Server 返回本机文件路径，代理运行用户需要能读取该文件。
+
+新 turn 只有在声明图片工具且未指定 `tool_choice: "none"` 时才允许内置生图。提交客户端工具结果时，省略图片设置会沿用原 turn 的设置。若续接请求试图更改该设置，代理返回 HTTP 400，原工具调用仍可重试。
+
 Codex 报告的输入、输出、缓存和推理 token 会出现在 JSON 响应的 `usage` 或 SSE 的 `response.completed.response.usage`。Chat Completions 流式客户端可以用 `stream_options.include_usage: true` 获取结束前的用量帧。工具续接按收到的累计用量增量计算，避免重复计数。token/s 由客户端根据用量和耗时计算。
 
 ## 客户端工具调用

@@ -295,6 +295,12 @@ async fn exercise_tool_call(mode: ToolStream) {
             send(&mut socket, json!({"id": models["id"], "result": {"data": [{"id": "test-model"}]}})).await;
             let thread = read(&mut socket).await;
             assert_eq!(thread["params"]["developerInstructions"], "System constraint\n\nDeveloper constraint");
+            let image_config = if matches!(mode, ToolStream::Responses(true)) {
+                Value::Null
+            } else {
+                json!(false)
+            };
+            assert_eq!(thread["params"]["config"]["features"]["image_generation"], image_config);
             let schema = if matches!(mode, ToolStream::Responses(true)) {
                 json!({"type": "object", "properties": {}})
             } else {
@@ -516,7 +522,15 @@ async fn completed_turn_reports_usage_when_output_queue_is_full() {
 async fn exercise_responses(app: Router, streaming: bool, state_path: PathBuf) {
     let tool = json!({"type": "function", "name": "read", "description": "Read a file",
                       "parameters": {"type": "object"}});
-    let request = |input, previous_id| {
+    let request = |input, previous_id, image_tool, tool_choice| {
+        let mut tools = if streaming {
+            vec![json!({"type": "function", "name": "read", "description": "Overridden"})]
+        } else {
+            vec![tool.clone()]
+        };
+        if image_tool {
+            tools.push(json!({"type": "image_generation"}));
+        }
         Request::post("/v1/responses")
             .header("authorization", "Bearer client-key")
             .header("content-type", "application/json")
@@ -525,11 +539,7 @@ async fn exercise_responses(app: Router, streaming: bool, state_path: PathBuf) {
                     "model": "test-model", "stream": streaming, "input": input,
                     "previous_response_id": previous_id, "store": false,
                     "instructions": "System constraint",
-                    "tools": if streaming {
-                        vec![json!({"type": "function", "name": "read", "description": "Overridden"})]
-                    } else {
-                        vec![tool.clone()]
-                    }
+                    "tools": tools, "tool_choice": tool_choice
                 })
                 .to_string(),
             ))
@@ -547,7 +557,7 @@ async fn exercise_responses(app: Router, streaming: bool, state_path: PathBuf) {
     }
     let first = app
         .clone()
-        .oneshot(request(json!(input), None))
+        .oneshot(request(json!(input), None, streaming, None::<&str>))
         .await
         .unwrap();
     let first = read_response(first, streaming).await;
@@ -570,12 +580,26 @@ async fn exercise_responses(app: Router, streaming: bool, state_path: PathBuf) {
     ]);
     let wrong = app
         .clone()
-        .oneshot(request(result.clone(), Some("resp_wrong")))
+        .oneshot(request(result.clone(), Some("resp_wrong"), false, None))
         .await
         .unwrap();
     assert_eq!(wrong.status(), StatusCode::CONFLICT);
     let previous = (!streaming).then_some(id);
-    let answer = app.oneshot(request(result, previous)).await.unwrap();
+    let changed = app
+        .clone()
+        .oneshot(request(
+            result.clone(),
+            previous,
+            !streaming,
+            streaming.then_some("none"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(changed.status(), StatusCode::BAD_REQUEST);
+    let answer = app
+        .oneshot(request(result, previous, false, None))
+        .await
+        .unwrap();
     let answer = read_response(answer, streaming).await;
     assert_eq!(answer["previous_response_id"], json!(previous));
     let state = response_state::State::open(Some(state_path)).unwrap();
@@ -648,6 +672,20 @@ async fn read_response(response: Response, streaming: bool) -> Value {
         "response.output_text.delta"
     };
     assert!(events.iter().any(|event| event["type"] == delta));
+    for (index, image) in last["response"]["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        if image["type"] == "image_generation_call" {
+            assert!(events.iter().any(|event| {
+                event["type"] == "response.image_generation_call.completed"
+                    && event["item_id"] == image["id"]
+                    && event["output_index"] == index
+            }));
+        }
+    }
     last["response"].clone()
 }
 
@@ -659,6 +697,7 @@ async fn discarded_queued_tool_result_reports_an_error() {
             "test-model",
             &json!({"tool": "read", "arguments": {}}),
             None,
+            false,
         )
         .unwrap();
     let (output, mut receiver) = output_channel();
@@ -666,6 +705,7 @@ async fn discarded_queued_tool_result_reports_an_error() {
         .resume_response(
             call["id"].as_str().unwrap(),
             "test-model",
+            None,
             None,
             Continuation::for_response("result".into(), output, None),
         )
@@ -849,6 +889,105 @@ async fn interrupts_turn_and_cleans_image_on_disconnect() {
     timeout(Duration::from_secs(10), exercise(true))
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn responses_returns_generated_image_in_json_and_sse() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("generated.png");
+    tokio::fs::write(&path, b"\x89PNG\r\n\x1a\n").await.unwrap();
+    for (streaming, disabled) in [(false, false), (true, false), (true, true)] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let app = router(Config {
+            ws_url: format!("ws://{}", listener.local_addr().unwrap()),
+            ws_token: "host-token".into(),
+            api_key: "client-key".into(),
+            cwd: dir.path().to_str().unwrap().into(),
+            images: None,
+            timeout: Duration::from_secs(5),
+        });
+        let path = path.clone();
+        let upstream = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let init = read(&mut socket).await;
+            send(&mut socket, json!({"id": init["id"], "result": {}})).await;
+            assert_eq!(read(&mut socket).await["method"], "initialized");
+            let models = read(&mut socket).await;
+            send(
+                &mut socket,
+                json!({"id": models["id"], "result": {"data": [{"id": "test-model"}]}}),
+            )
+            .await;
+            let thread = read(&mut socket).await;
+            assert!(thread["params"].get("dynamicTools").is_none());
+            assert_eq!(
+                thread["params"]["config"]["features"]["image_generation"],
+                disabled.then_some(false).map_or(Value::Null, Value::Bool)
+            );
+            send(
+                &mut socket,
+                json!({"id": thread["id"], "result": {"thread": {"id": "thread"}}}),
+            )
+            .await;
+            let turn = read(&mut socket).await;
+            send(
+                &mut socket,
+                json!({"id": turn["id"], "result": {"turn": {"id": "turn"}}}),
+            )
+            .await;
+            let mut item = json!({"type": "imageGeneration", "status": "completed"});
+            if streaming {
+                item["savedPath"] = json!(path);
+            } else {
+                item["result"] = json!("iVBORw0KGgo=");
+            }
+            send(
+                &mut socket,
+                json!({"method": "item/completed", "params": {
+                    "threadId": "thread", "turnId": "turn", "item": item
+                }}),
+            )
+            .await;
+            send(
+                &mut socket,
+                json!({"method": "item/agentMessage/delta", "params": {
+                    "threadId": "thread", "turnId": "turn", "itemId": "reply", "delta": "Image ready."
+                }}),
+            )
+            .await;
+            send(
+                &mut socket,
+                json!({"method": "turn/completed", "params": {
+                    "threadId": "thread", "turn": {"id": "turn", "status": "completed"}
+                }}),
+            )
+            .await;
+        });
+        let request = Request::post("/v1/responses")
+            .header("authorization", "Bearer client-key")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "model": "test-model", "input": "Draw a red circle",
+                    "stream": streaming, "tools": [{"type": "image_generation"}],
+                    "tool_choice": disabled.then_some("none")
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let response = read_response(app.oneshot(request).await.unwrap(), streaming).await;
+        assert_eq!(response["output"][0]["content"][0]["text"], "Image ready.");
+        let item = &response["output"][1];
+        if disabled {
+            assert!(item.is_null());
+        } else {
+            assert_eq!(item["type"], "image_generation_call");
+            assert_eq!(item["result"], "iVBORw0KGgo=");
+            assert!(item.get("savedPath").is_none());
+        }
+        upstream.await.unwrap();
+    }
 }
 
 #[tokio::test]

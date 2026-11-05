@@ -201,6 +201,7 @@ struct TurnInput {
     messages: Vec<Message>,
     tools: Tools,
     tool_choice: Option<Value>,
+    image_generation: Option<bool>,
 }
 
 async fn start_chat(
@@ -228,12 +229,14 @@ async fn start_chat(
             id,
             &body.model,
             previous_id,
+            body.image_generation,
             Continuation::for_response(result.tool_result()?, sender, response_id),
         )?;
         return Ok(receiver);
     }
     let definitions = body.tools.definitions(body.tool_choice.as_ref())?;
     let tools_enabled = !definitions.is_empty();
+    let image_generation = body.image_generation.unwrap_or(false);
     // The owned permit keeps the slot occupied until cancellation and cleanup finish.
     let permit = app.chat_slot.clone().try_acquire_owned().map_err(|_| {
         ApiError(
@@ -263,6 +266,9 @@ async fn start_chat(
             "model": model["model"].as_str().unwrap_or(&body.model),
             "cwd": config.cwd, "ephemeral": true, "approvalPolicy": "never", "sandbox": "read-only"
         });
+        if !image_generation {
+            params["config"] = json!({"features": {"image_generation": false}});
+        }
         if tools_enabled {
             params["dynamicTools"] = json!(definitions);
         }
@@ -285,7 +291,14 @@ async fn start_chat(
         let mut sender = sender;
         let tools = tools_enabled.then_some((&app.pending_tool, body.model.as_str(), response_id));
         let result = codex
-            .turn(&thread_id, input, deadline, &mut sender, tools)
+            .turn(
+                &thread_id,
+                input,
+                deadline,
+                &mut sender,
+                tools,
+                image_generation,
+            )
             .await;
         app.pending_tool.clear();
         drop(codex);

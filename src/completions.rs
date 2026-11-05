@@ -39,6 +39,7 @@ pub async fn create(
         messages: body.messages,
         tools: Tools::Chat(body.tools),
         tool_choice: body.tool_choice,
+        image_generation: Some(false),
     };
     let receiver = start_chat(app, input, None, None).await?;
     respond(completion, receiver, streaming, include_usage).await
@@ -53,8 +54,9 @@ async fn respond(
     if streaming {
         return Ok(stream_response(completion, receiver, include_usage));
     }
-    let reply::Collected { text, usage, tool } =
-        reply::collect(receiver).await.map_err(turn_error)?;
+    let reply::Collected {
+        text, usage, tool, ..
+    } = reply::collect(receiver).await.map_err(turn_error)?;
     let mut message = json!({ "role": "assistant" });
     message["content"] = if text.is_empty() && tool.is_some() {
         Value::Null
@@ -126,6 +128,7 @@ fn stream_response(
                             );
                         }
                         Some(Ok(Output::Usage(stats))) => usage = Some(stats),
+                        Some(Ok(Output::Image(_))) => {}
                         Some(Ok(Output::Tool(mut call, delivered))) => {
                             handoff = Some(delivered);
                             call["index"] = json!(0);
