@@ -1,7 +1,7 @@
 use crate::input::response_message;
 use crate::reply::{self, Completion, json_response, sse_response, turn_error};
 use crate::response_state::Record;
-use crate::{ApiError, App, Output, json_error, start_chat};
+use crate::{ApiError, App, Output, TurnInput, json_error, start_chat, tools::Tools};
 use anyhow::Result;
 use axum::{
     Json,
@@ -151,13 +151,16 @@ pub async fn create(
     if let Some(instructions) = &request.instructions {
         messages.insert(0, json!({ "role": "developer", "content": instructions }));
     }
-    let tools = tools.into_values().collect::<Vec<_>>();
-    let chat = serde_json::from_value(json!({
-        "model": request.model, "messages": messages, "tools": tools, "tool_choice": request.tool_choice
-    })).map_err(|_| ApiError::bad_request("Invalid Responses input"))?;
+    let input = TurnInput {
+        model: request.model,
+        messages: serde_json::from_value(Value::Array(messages))
+            .map_err(|_| ApiError::bad_request("Invalid Responses input"))?,
+        tools: Tools::Responses(tools),
+        tool_choice: request.tool_choice,
+    };
     let receiver = start_chat(
         app.clone(),
-        chat,
+        input,
         Some(completion.id.clone()),
         request
             .previous_response_id
@@ -213,10 +216,12 @@ fn add_function(tools: &mut BTreeMap<String, Value>, mut tool: Value) -> Result<
         .as_str()
         .ok_or_else(|| ApiError::bad_request("Responses function tool requires a name"))?
         .to_owned();
-    if tool["parameters"].is_null() {
-        tool["parameters"] = json!({"type": "object", "properties": {}});
+    if let Some(fields) = tool.as_object_mut()
+        && fields.get("parameters").is_some_and(Value::is_null)
+    {
+        fields.remove("parameters");
     }
-    tools.insert(name, json!({"type": "function", "function": tool}));
+    tools.insert(name, tool);
     Ok(())
 }
 

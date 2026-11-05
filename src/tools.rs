@@ -2,7 +2,10 @@ use crate::ApiError;
 use anyhow::{Context, Result};
 use axum::http::StatusCode;
 use serde_json::{Value, json};
-use std::{collections::HashSet, sync::Mutex};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Mutex,
+};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
@@ -134,49 +137,67 @@ impl PendingTool {
     }
 }
 
-pub fn definitions(tools: Option<Value>, choice: Option<Value>) -> Result<Vec<Value>, ApiError> {
-    match choice.as_ref().map(Value::as_str) {
-        Some(Some("none")) => return Ok(vec![]),
-        Some(Some("auto")) | None => {}
-        _ => {
-            return Err(ApiError::bad_request(
-                "Only auto and none tool_choice are supported",
-            ));
+pub enum Tools {
+    Chat(Option<Value>),
+    Responses(BTreeMap<String, Value>),
+}
+
+impl Tools {
+    pub fn definitions(&self, choice: Option<&Value>) -> Result<Vec<Value>, ApiError> {
+        match choice.map(Value::as_str) {
+            Some(Some("none")) => return Ok(vec![]),
+            Some(Some("auto")) | None => {}
+            _ => {
+                return Err(ApiError::bad_request(
+                    "Only auto and none tool_choice are supported",
+                ));
+            }
+        }
+        match self {
+            Self::Chat(None) => Ok(vec![]),
+            Self::Chat(Some(tools)) => {
+                let tools = tools
+                    .as_array()
+                    .ok_or_else(|| ApiError::bad_request("tools must be an array"))?;
+                normalize(tools.iter().map(|tool| {
+                    if tool["type"] != "function" {
+                        return Err(invalid_definition());
+                    }
+                    Ok(&tool["function"])
+                }))
+            }
+            Self::Responses(tools) => normalize(tools.values().map(Ok)),
         }
     }
-    let Some(tools) = tools else {
-        return Ok(vec![]);
-    };
-    let tools = tools
-        .as_array()
-        .ok_or_else(|| ApiError::bad_request("tools must be an array"))?;
+}
+
+fn invalid_definition() -> ApiError {
+    ApiError::bad_request("Expected unique function tools with valid names and object schemas")
+}
+
+fn normalize<'a>(
+    functions: impl Iterator<Item = Result<&'a Value, ApiError>>,
+) -> Result<Vec<Value>, ApiError> {
     let mut names = HashSet::new();
-    tools
-        .iter()
-        .map(|tool| {
-            let invalid = || {
-                ApiError::bad_request(
-                    "Expected unique function tools with valid names and object schemas",
-                )
-            };
-            let function = &tool["function"];
-            let name = function["name"].as_str().ok_or_else(invalid)?;
-            if tool["type"] != "function"
-                || name.is_empty()
+    functions
+        .map(|function| {
+            let function = function?;
+            let name = function["name"].as_str().ok_or_else(invalid_definition)?;
+            if name.is_empty()
                 || name.len() > 64
                 || !name
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
                 || !names.insert(name)
             {
-                return Err(invalid());
+                return Err(invalid_definition());
             }
             let schema = function
                 .get("parameters")
                 .cloned()
                 .unwrap_or_else(|| json!({"type": "object", "properties": {}}));
             if !schema.is_object() {
-                return Err(invalid());
+                return Err(invalid_definition());
             }
             Ok(json!({
                 "type": "function", "name": name, "inputSchema": schema,

@@ -295,10 +295,15 @@ async fn exercise_tool_call(mode: ToolStream) {
             send(&mut socket, json!({"id": models["id"], "result": {"data": [{"id": "test-model"}]}})).await;
             let thread = read(&mut socket).await;
             assert_eq!(thread["params"]["developerInstructions"], "System constraint\n\nDeveloper constraint");
-            assert_eq!(thread["params"]["dynamicTools"][0], json!({
+            let schema = if matches!(mode, ToolStream::Responses(true)) {
+                json!({"type": "object", "properties": {}})
+            } else {
+                json!({"type": "object"})
+            };
+            assert_eq!(thread["params"]["dynamicTools"], json!([{
                 "type": "function", "name": "read", "description": "Read a file",
-                "inputSchema": {"type": "object"}
-            }));
+                "inputSchema": schema
+            }]));
             send(&mut socket, json!({"id": thread["id"], "result": {"thread": {"id": "thread"}}})).await;
             let turn = read(&mut socket).await;
             assert_eq!(turn["method"], "turn/start");
@@ -520,7 +525,11 @@ async fn exercise_responses(app: Router, streaming: bool, state_path: PathBuf) {
                     "model": "test-model", "stream": streaming, "input": input,
                     "previous_response_id": previous_id, "store": false,
                     "instructions": "System constraint",
-                    "tools": if streaming { vec![] } else { vec![tool.clone()] }
+                    "tools": if streaming {
+                        vec![json!({"type": "function", "name": "read", "description": "Overridden"})]
+                    } else {
+                        vec![tool.clone()]
+                    }
                 })
                 .to_string(),
             ))
@@ -532,7 +541,9 @@ async fn exercise_responses(app: Router, streaming: bool, state_path: PathBuf) {
         json!({"role": "user", "content": [{"type": "input_text", "text": "Read README.md"}]}),
     ];
     if streaming {
-        input.push(json!({"type": "additional_tools", "role": "developer", "tools": [tool]}));
+        let mut additional = tool.clone();
+        additional["parameters"] = Value::Null;
+        input.push(json!({"type": "additional_tools", "role": "developer", "tools": [additional]}));
     }
     let first = app
         .clone()

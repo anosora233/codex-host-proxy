@@ -1,5 +1,11 @@
 use crate::reply::{self, Completion, json_response, sse_response, turn_error};
-use crate::{ApiError, App, input::Chat, json_error, start_chat, tools::Output, usage};
+use crate::{
+    ApiError, App, TurnInput,
+    input::Chat,
+    json_error, start_chat,
+    tools::{Output, Tools},
+    usage,
+};
 use anyhow::Result;
 use axum::{
     Json,
@@ -16,13 +22,25 @@ pub async fn create(
     body: Result<Json<Chat>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(body) = body.map_err(json_error)?;
+    if body.n.is_some_and(|n| n != 1) || body.functions.is_some() || body.response_format.is_some()
+    {
+        return Err(ApiError::bad_request(
+            "A model is required; legacy functions, response_format and multiple choices are unsupported",
+        ));
+    }
     let streaming = body.stream;
     let include_usage = body
         .stream_options
         .as_ref()
         .is_some_and(|options| options.include_usage);
     let completion = Completion::new("chatcmpl-", body.model.clone());
-    let receiver = start_chat(app, body, None, None).await?;
+    let input = TurnInput {
+        model: body.model,
+        messages: body.messages,
+        tools: Tools::Chat(body.tools),
+        tool_choice: body.tool_choice,
+    };
+    let receiver = start_chat(app, input, None, None).await?;
     respond(completion, receiver, streaming, include_usage).await
 }
 

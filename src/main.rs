@@ -19,7 +19,7 @@ use axum::{
     routing::{get, post},
 };
 use codex::Codex;
-use input::Chat;
+use input::Message;
 use serde_json::{Value, json};
 use std::{
     env,
@@ -32,7 +32,7 @@ use tokio::{
     sync::{Semaphore, mpsc},
     time::{Instant, timeout_at},
 };
-use tools::{Continuation, Output, PendingTool, output_channel};
+use tools::{Continuation, Output, PendingTool, Tools, output_channel};
 
 struct Config {
     ws_url: String,
@@ -196,17 +196,20 @@ fn json_error(error: JsonRejection) -> ApiError {
     }
 }
 
+struct TurnInput {
+    model: String,
+    messages: Vec<Message>,
+    tools: Tools,
+    tool_choice: Option<Value>,
+}
+
 async fn start_chat(
     app: Arc<App>,
-    body: Chat,
+    body: TurnInput,
     response_id: Option<String>,
     previous_id: Option<&str>,
 ) -> Result<mpsc::Receiver<Result<Output>>, ApiError> {
-    if body.model.is_empty()
-        || body.n.is_some_and(|n| n != 1)
-        || body.functions.is_some()
-        || body.response_format.is_some()
-    {
+    if body.model.is_empty() {
         return Err(ApiError::bad_request(
             "A model is required; legacy functions, response_format and multiple choices are unsupported",
         ));
@@ -229,7 +232,7 @@ async fn start_chat(
         )?;
         return Ok(receiver);
     }
-    let definitions = tools::definitions(body.tools, body.tool_choice)?;
+    let definitions = body.tools.definitions(body.tool_choice.as_ref())?;
     let tools_enabled = !definitions.is_empty();
     // The owned permit keeps the slot occupied until cancellation and cleanup finish.
     let permit = app.chat_slot.clone().try_acquire_owned().map_err(|_| {
